@@ -187,7 +187,19 @@ Example request overriding the collection:
 
 ### `POST /dedupe/save-pdf`
 
-Request:
+Preferred: raw PDF body (`Content-Type: application/pdf`) with the metadata in
+headers:
+
+```text
+X-Zotero-Dedupe-Item-ID: 42
+X-Zotero-Dedupe-Title: Full%20Text%20PDF
+X-Zotero-Dedupe-URL: https%3A%2F%2Fexample.com%2Fpaper.pdf
+```
+
+The stream is passed directly to `Zotero.Attachments.importFromNetworkStream()`,
+which avoids base64 and an extra file copy.
+
+For compatibility, a JSON request is also accepted:
 
 ```json
 {
@@ -198,9 +210,9 @@ Request:
 }
 ```
 
-`data` is a base64-encoded PDF downloaded by the browser extension. The plugin
-validates the `%PDF-` header, writes it to a temporary file, imports it as a
-child attachment, and removes the temporary file.
+`data` is a base64-encoded PDF. The plugin validates the `%PDF-` header, writes
+it to a temporary file, imports it as a child attachment, and removes the
+temporary file.
 
 ## Troubleshooting
 

@@ -11,7 +11,7 @@
 
 var ZoteroDedupe = {
 	id: "zotero-dedupe@example.com",
-	version: "1.1.2",
+	version: "1.1.6",
 	checkPath: "/dedupe/check",
 	pingPath: "/dedupe/ping",
 	savePath: "/dedupe/save",
@@ -68,7 +68,11 @@ var ZoteroDedupe = {
 
 		function Endpoint() {}
 		Endpoint.prototype.supportedMethods = ["GET", "POST"];
-		Endpoint.prototype.supportedDataTypes = ["application/json"];
+		Endpoint.prototype.supportedDataTypes = [
+			"application/json",
+			"application/pdf",
+			"application/octet-stream"
+		];
 		// The request comes from a browser extension, so opt into browser access.
 		Endpoint.prototype.allowRequestsFromUnsafeWebContent = true;
 
@@ -360,6 +364,14 @@ var ZoteroDedupe = {
 	},
 
 	async handleSavePdfRequest(request) {
+		let requestType = String(
+			request.headers["content-type"] || ""
+		).split(";")[0].trim().toLowerCase();
+		if (requestType === "application/pdf"
+				|| requestType === "application/octet-stream") {
+			return this.handleRawPdfRequest(request);
+		}
+
 		let payload = this.parsePayload(request);
 		let itemID = Number(payload.itemID || payload.itemId);
 		let parentItem = Number.isInteger(itemID) && itemID > 0
@@ -421,6 +433,63 @@ var ZoteroDedupe = {
 			parentItemID: parentItem.id,
 			attachment: this.snapshotItem(attachment)
 		});
+	},
+
+	async handleRawPdfRequest(request) {
+		let itemID = Number(request.headers["x-zotero-dedupe-item-id"]);
+		let parentItem = Number.isInteger(itemID) && itemID > 0
+			? Zotero.Items.get(itemID)
+			: null;
+
+		if (!parentItem || !parentItem.isRegularItem()) {
+			throw new Error("Parent item not found: " + itemID);
+		}
+
+		let byteCount = Number(request.headers["content-length"] || 0);
+		if (!byteCount) {
+			throw new Error("Content-Length is required");
+		}
+		if (byteCount > 100 * 1024 * 1024) {
+			throw new Error("PDF is too large");
+		}
+
+		let contentType = String(
+			request.headers["content-type"] || "application/pdf"
+		).split(";")[0].trim() || "application/pdf";
+		let title = this.decodeHeaderValue(
+			request.headers["x-zotero-dedupe-title"]
+		) || "Full Text PDF";
+		let url = this.decodeHeaderValue(
+			request.headers["x-zotero-dedupe-url"]
+		) || "https://example.invalid/attachment.pdf";
+
+		let attachment = await Zotero.Attachments.importFromNetworkStream({
+			url,
+			stream: request.data,
+			byteCount,
+			contentType,
+			parentItemID: parentItem.id,
+			title
+		});
+
+		return this.json(200, {
+			ok: true,
+			raw: true,
+			parentItemID: parentItem.id,
+			attachment: this.snapshotItem(attachment)
+		});
+	},
+
+	decodeHeaderValue(value) {
+		if (!value) {
+			return "";
+		}
+		try {
+			return decodeURIComponent(String(value));
+		}
+		catch (_) {
+			return String(value);
+		}
 	},
 
 	base64ToBytes(value) {
