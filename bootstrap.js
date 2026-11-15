@@ -11,11 +11,12 @@
 
 var ZoteroDedupe = {
 	id: "zotero-dedupe@example.com",
-	version: "1.1.1",
+	version: "1.1.2",
 	checkPath: "/dedupe/check",
 	pingPath: "/dedupe/ping",
 	savePath: "/dedupe/save",
 	savePdfPath: "/dedupe/save-pdf",
+	collectionsPath: "/dedupe/collections",
 
 	async startup() {
 		try {
@@ -43,6 +44,7 @@ var ZoteroDedupe = {
 			delete Zotero.Server.Endpoints[this.pingPath];
 			delete Zotero.Server.Endpoints[this.savePath];
 			delete Zotero.Server.Endpoints[this.savePdfPath];
+			delete Zotero.Server.Endpoints[this.collectionsPath];
 		}
 	},
 
@@ -78,6 +80,9 @@ var ZoteroDedupe = {
 				if (request.pathname === self.savePdfPath) {
 					return await self.handleSavePdfRequest(request);
 				}
+				if (request.pathname === self.collectionsPath) {
+					return await self.handleCollectionsRequest();
+				}
 
 				if (request.method === "GET") {
 					return self.json(200, self.status());
@@ -111,6 +116,7 @@ var ZoteroDedupe = {
 		Zotero.Server.Endpoints[this.pingPath] = Endpoint;
 		Zotero.Server.Endpoints[this.savePath] = Endpoint;
 		Zotero.Server.Endpoints[this.savePdfPath] = Endpoint;
+		Zotero.Server.Endpoints[this.collectionsPath] = Endpoint;
 	},
 
 	status() {
@@ -242,24 +248,97 @@ var ZoteroDedupe = {
 		return json;
 	},
 
+	async handleCollectionsRequest() {
+		let target = this.getSaveTarget();
+		let library = target.library
+			|| Zotero.Libraries.get(Zotero.Libraries.userLibraryID);
+
+		if (!library) {
+			throw new Error("No Zotero library is available");
+		}
+
+		let collections = Zotero.Collections
+			.getByLibrary(library.libraryID, true, false)
+			.map(collection => ({
+				collectionID: collection.id,
+				key: collection.key,
+				name: collection.name,
+				level: collection.level || 0,
+				parentID: collection.parentID || null,
+				path: this.collectionInfo(collection).path
+			}));
+
+		return this.json(200, {
+			ok: true,
+			library: {
+				libraryID: library.libraryID,
+				name: library.name,
+				editable: !!library.editable,
+				isGroup: !!library.isGroup
+			},
+			selectedCollectionID: target.collection ? target.collection.id : null,
+			target: this.targetInfo(target),
+			collections
+		});
+	},
+
+	resolveCollection(target, options) {
+		let hasCollectionID = Object.prototype.hasOwnProperty.call(
+			options || {}, "collectionID"
+		);
+		if (!hasCollectionID && !(options && options.collectionKey)) {
+			return target.collection;
+		}
+
+		let id = options.collectionID;
+		if (id === null || id === undefined || id === "" || id === 0 || id === "0") {
+			// 0 means "Library root"
+			return null;
+		}
+
+		let collection = options.collectionKey
+			? Zotero.Collections.getByLibraryAndKey(
+				target.library.libraryID,
+				String(options.collectionKey)
+			)
+			: Zotero.Collections.get(Number(id));
+
+		if (!collection || collection.deleted) {
+			throw new Error("Collection not found: " + (id || options.collectionKey));
+		}
+		if (collection.libraryID !== target.library.libraryID) {
+			throw new Error("Collection is in a different library");
+		}
+		return collection;
+	},
+
 	async handleSaveRequest(request) {
 		let payload = this.parsePayload(request);
 		let item = payload.item && typeof payload.item === "object"
 			? payload.item
 			: payload;
-		let target = this.getSaveTarget();
+		let options = payload.options && typeof payload.options === "object"
+			? payload.options
+			: {};
+		let currentTarget = this.getSaveTarget();
 
-		if (!target.library) {
+		if (!currentTarget.library) {
 			throw new Error("No Zotero library is available");
 		}
-		if (!target.library.editable) {
+		if (!currentTarget.library.editable) {
 			throw new Error("The selected Zotero library is read-only");
 		}
 
+		let saveTarget = {
+			library: currentTarget.library,
+			collection: this.resolveCollection(currentTarget, options),
+			editable: currentTarget.editable
+		};
+
 		let JSONItem = this.prepareItemForSave(item);
 		let saver = new Zotero.Translate.ItemSaver({
-			libraryID: target.library.libraryID,
-			collections: target.collection ? [target.collection.id] : undefined,
+			libraryID: saveTarget.library.libraryID,
+			collections: saveTarget.collection ? [saveTarget.collection.id] : undefined,
 			attachmentMode: Zotero.Translate.ItemSaver.ATTACHMENT_MODE_IGNORE
 		});
 		let saved = await saver.saveItems([JSONItem], () => 0, () => 0);
@@ -274,7 +353,7 @@ var ZoteroDedupe = {
 		return this.json(200, {
 			ok: true,
 			item: this.snapshotItem(savedItem),
-			target: this.targetInfo(target),
+			target: this.targetInfo(saveTarget),
 			pdfSupported: true,
 			savedAt: new Date().toISOString()
 		});

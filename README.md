@@ -14,6 +14,7 @@ Browser page
   └─ zotero-dedupe-extension (content script)
        └─ background service worker
             ├─ POST http://127.0.0.1:23119/dedupe/check
+            ├─ GET  http://127.0.0.1:23119/dedupe/collections
             ├─ POST http://127.0.0.1:23119/dedupe/save
             └─ POST http://127.0.0.1:23119/dedupe/save-pdf
 ```
@@ -137,10 +138,32 @@ Matching order:
 Fuzzy matching only runs when no identifier matches. Candidates are restricted
 to regular top-level items and deleted items are excluded.
 
+### `GET /dedupe/collections`
+
+Lists the collections in the current library so the extension can show a
+collection picker:
+
+```json
+{
+  "ok": true,
+  "library": { "name": "My Library" },
+  "selectedCollectionID": 2,
+  "collections": [
+    { "collectionID": 1, "key": "COLL0001", "path": "Papers", "level": 0 },
+    { "collectionID": 2, "key": "COLL0002", "path": "Papers / 2026", "level": 1 }
+  ]
+}
+```
+
 ### `POST /dedupe/save`
 
-Saves an item into the collection currently selected in Zotero (the same target
-logic as Zotero Connector), then returns the saved item and target path:
+Saves an item into:
+
+- `options.collectionID` if provided (`0` means library root), or
+- the collection currently selected in Zotero when no override is provided.
+
+The target logic is the same as Zotero Connector. The response returns the saved
+item and target path:
 
 ```json
 {
@@ -150,6 +173,15 @@ logic as Zotero Connector), then returns the saved item and target path:
     "collection": { "key": "COLL0002", "path": "Papers / 2026" },
     "path": "My Library / Papers / 2026"
   }
+}
+```
+
+Example request overriding the collection:
+
+```json
+{
+  "item": { "itemType": "journalArticle", "title": "Example title" },
+  "options": { "collectionID": 2 }
 }
 ```
 
