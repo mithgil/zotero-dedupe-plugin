@@ -1,0 +1,13 @@
+# Build output
+zotero-dedupe.xpi
+*.zip
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
