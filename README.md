@@ -14,7 +14,7 @@ This project has two parts:
 | Component | Repository | Version |
 | --- | --- | --- |
 | Zotero plugin (this repo) | `zotero-dedupe-plugin` | 1.1.6 |
-| Browser extension | [`../zotero-dedupe-extension`](../zotero-dedupe-extension/README.md) | 1.3.2 |
+| Browser extension | [`../zotero-dedupe-extension`](../zotero-dedupe-extension/README.md) | 1.3.3 |
 
 The plugin is the Zotero-side service:
 
@@ -123,7 +123,7 @@ Expected response:
 5. Pin **Zotero Dedupe** from the puzzle-piece menu.
 6. Open a paper page and refresh it once.
 
-The extension version should be **1.3.2** or newer. See
+The extension version should be **1.3.3** or newer. See
 [`../zotero-dedupe-extension/README.md`](../zotero-dedupe-extension/README.md)
 for permissions, PDF troubleshooting, and development notes.
 
@@ -348,7 +348,7 @@ page.
 
 | Plugin | Extension |
 | --- | --- |
-| 1.1.6 | 1.3.2 |
+| 1.1.6 | 1.3.3 |
 
 The extension requires plugin **1.1.6** or newer for:
 
