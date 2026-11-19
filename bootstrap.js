@@ -7,16 +7,18 @@
  *   /dedupe/check     - duplicate check
  *   /dedupe/save      - save an item into the selected collection
  *   /dedupe/save-pdf  - attach a browser-downloaded PDF
+ *   /dedupe/merge     - merge duplicate items (token protected, dry run by default)
  */
 
 var ZoteroDedupe = {
 	id: "zotero-dedupe@example.com",
-	version: "1.1.6",
+	version: "1.2.0",
 	checkPath: "/dedupe/check",
 	pingPath: "/dedupe/ping",
 	savePath: "/dedupe/save",
 	savePdfPath: "/dedupe/save-pdf",
 	collectionsPath: "/dedupe/collections",
+	mergePath: "/dedupe/merge",
 
 	async startup() {
 		try {
@@ -45,6 +47,7 @@ var ZoteroDedupe = {
 			delete Zotero.Server.Endpoints[this.savePath];
 			delete Zotero.Server.Endpoints[this.savePdfPath];
 			delete Zotero.Server.Endpoints[this.collectionsPath];
+			delete Zotero.Server.Endpoints[this.mergePath];
 		}
 	},
 
@@ -78,6 +81,9 @@ var ZoteroDedupe = {
 
 		Endpoint.prototype.init = async function (request) {
 			try {
+				if (request.pathname === self.mergePath) {
+					return await self.handleMergeRequest(request);
+				}
 				if (request.pathname === self.savePath) {
 					return await self.handleSaveRequest(request);
 				}
@@ -121,6 +127,7 @@ var ZoteroDedupe = {
 		Zotero.Server.Endpoints[this.savePath] = Endpoint;
 		Zotero.Server.Endpoints[this.savePdfPath] = Endpoint;
 		Zotero.Server.Endpoints[this.collectionsPath] = Endpoint;
+		Zotero.Server.Endpoints[this.mergePath] = Endpoint;
 	},
 
 	status() {
@@ -490,6 +497,442 @@ var ZoteroDedupe = {
 		catch (_) {
 			return String(value);
 		}
+	},
+
+	// ---------------------------------------------------------------------
+	// /dedupe/merge
+	//
+	// Merges duplicate items with Zotero's own merge code
+	// (chrome://zotero/content/mergeItems.mjs), so notes, attachments, tags,
+	// collections and relations are moved instead of lost, and the merged-away
+	// items go to the Trash rather than disappearing.
+	//
+	// This endpoint writes, so two guards are always on:
+	//   * the request must carry X-Zotero-Dedupe-Merge-Token, matching the
+	//     contents of <zotero data dir>/zotero-dedupe-merge-token. The endpoint
+	//     is reachable from web content, so without a secret anyone who lands
+	//     you on a page could ask for merges.
+	//   * dryRun defaults to true; a real merge must say "dryRun": false.
+	// Zotero's mergeItems() only moves children/tags/collections/relations -
+	// it never copies field values - so fillMissingFields() first copies over
+	// anything the master is missing. A field the master already has is never
+	// touched.
+	// ---------------------------------------------------------------------
+	mergeTokenFile: "zotero-dedupe-merge-token",
+	mergeTokenHeader: "x-zotero-dedupe-merge-token",
+	_fallbackFields: [
+		"DOI", "ISBN", "ISSN", "url", "extra", "abstractNote", "title",
+		"publicationTitle", "volume", "issue", "pages", "date", "language",
+		"publisher", "journalAbbreviation", "shortTitle", "accessDate",
+		"archiveLocation", "repository", "rights"
+	],
+
+	async readMergeToken() {
+		let path = null;
+		try {
+			path = PathUtils.join(
+				Zotero.DataDirectory.dir, this.mergeTokenFile
+			);
+			this._tokenPath = path;
+			let text;
+			if (typeof IOUtils.readUTF8 === "function") {
+				text = await IOUtils.readUTF8(path);
+			}
+			else {
+				text = new TextDecoder().decode(await IOUtils.read(path));
+			}
+			this._tokenError = null;
+			return (text || "").trim() || null;
+		}
+		catch (error) {
+			// Missing file and unreadable file look the same to the caller: merge
+			// stays off. Keep the reason for GET /dedupe/merge.
+			this._tokenError = error && error.message
+				? error.message
+				: String(error);
+			this.log("merge token unavailable: " + this._tokenError);
+			return null;
+		}
+	},
+
+	checkMergeToken(request, expected) {
+		let headers = request.headers || {};
+		let given = headers[this.mergeTokenHeader]
+			|| headers["X-Zotero-Dedupe-Merge-Token"];
+		if (String(given || "").trim() !== String(expected).trim()) {
+			throw new Error("Missing or wrong " + this.mergeTokenHeader);
+		}
+	},
+
+	getMergeFn() {
+		if (this._mergeFn) {
+			return this._mergeFn;
+		}
+		try {
+			let mod = ChromeUtils.importESModule(
+				"chrome://zotero/content/mergeItems.mjs"
+			);
+			if (mod && typeof mod.mergeItems === "function") {
+				this._mergeSource = "mergeItems.mjs";
+				this._mergeFn = (item, others) => mod.mergeItems(item, others);
+				return this._mergeFn;
+			}
+		}
+		catch (error) {
+			this.log("mergeItems.mjs unavailable: " + error.message);
+		}
+		if (Zotero.Items && typeof Zotero.Items.merge === "function") {
+			this._mergeSource = "Zotero.Items.merge";
+			this._mergeFn = (item, others) => Zotero.Items.merge(item, others);
+		}
+		return this._mergeFn;
+	},
+
+	mergeCapabilities() {
+		let mergeFn = this.getMergeFn();
+		return {
+			ok: !!mergeFn,
+			available: true,
+			name: "Zotero Dedupe",
+			version: this.version,
+			zoteroVersion: Zotero.version,
+			endpoint: this.mergePath,
+			implementation: this._mergeSource || null,
+			tokenConfigured: null,
+			fieldSource: "itemTypeFieldsCombined + fallback"
+		};
+	},
+
+	resolveMergeItem(ref, libraryID, what) {
+		let value = String(ref === null || ref === undefined ? "" : ref).trim();
+		if (!value) {
+			throw new Error(what + " is missing");
+		}
+		let item = /^\d+$/.test(value)
+			? Zotero.Items.get(Number(value))
+			: Zotero.Items.getByLibraryAndKey(libraryID, value);
+		if (!item) {
+			throw new Error(what + " not found: " + value);
+		}
+		return item;
+	},
+
+	mergeEvidence(item, other) {
+		let dois = [
+			this.normalizeDoi(this.safeField(item, "DOI")),
+			this.normalizeDoi(this.safeField(other, "DOI"))
+		];
+		if (dois[0] && dois[1] && dois[0] === dois[1]) {
+			return "doi";
+		}
+		let titles = [
+			this.normalizeTitle(this.safeField(item, "title")),
+			this.normalizeTitle(this.safeField(other, "title"))
+		];
+		if (titles[0] && titles[1] && titles[0] === titles[1]) {
+			return "title";
+		}
+		let years = [this.extractYear(this.safeField(item, "date")),
+			this.extractYear(this.safeField(other, "date"))];
+		if (years[0] && years[0] === years[1] && (titles[0] || titles[1])) {
+			return "title+year";
+		}
+		return null;
+	},
+
+	_internalFields: new Set([
+		"creators", "itemType", "key", "id", "dateAdded", "dateModified",
+		"deleted", "version", "parentItem", "parentItemID", "firstCreator",
+		"manualOrder", "format", "rels", "note", "annotation"
+	]),
+	_fieldsByType: new Map(),
+
+	/**
+	 * Field names valid for an item's type, from the schema tables
+	 * (itemTypeFieldsCombined = the type's own fields plus the base mappings).
+	 * Zotero.ItemTypes has no getFields() in Zotero 7-9.
+	 */
+	async fieldsFor(item) {
+		if (this._fieldsByType.has(item.itemTypeID)) {
+			return this._fieldsByType.get(item.itemTypeID);
+		}
+		let fields = [];
+		try {
+			let rows = await Zotero.DB.queryAsync(
+				`SELECT fc.fieldName
+				 FROM itemTypeFieldsCombined itf
+				 JOIN fieldsCombined fc ON fc.fieldID = itf.fieldID
+				 WHERE itf.itemTypeID = ?`,
+				[item.itemTypeID]
+			);
+			fields = rows
+				.map(row => row.fieldName)
+				.filter(name => !this._internalFields.has(name));
+		}
+		catch (error) {
+			this.log("type fields query failed: " + error.message);
+		}
+		if (!fields.length) {
+			fields = this._fallbackFields.slice();
+		}
+		fields = this.unique(fields);
+		this._fieldsByType.set(item.itemTypeID, fields);
+		return fields;
+	},
+
+	/**
+	 * Work out which values the master is missing. Pure: it only reads, because
+	 * a dry run must not leave changed fields sitting on the in-memory item.
+	 * Creators are only copied when the master has none: merging creator lists
+	 * would risk the duplicated-author rows this library already has.
+	 */
+	async planFieldFill(item, others) {
+		let fields = await this.fieldsFor(item);
+		let plan = [];
+		for (let other of others) {
+			for (let field of fields) {
+				let current = this.safeField(item, field);
+				if (this.isBlank(current)) {
+					let value = this.safeField(other, field);
+					if (!this.isBlank(value)) {
+						if (field === "DOI") {
+							// Zotero stores a bare DOI; a copied record may hold
+							// the doi.org URL instead.
+							try {
+								value = Zotero.Utilities.cleanDOI(value) || value;
+							}
+							catch (_) {}
+						}
+						plan.push({
+							key: other.key, itemID: other.id, field, value
+						});
+					}
+				}
+			}
+			let creators = [];
+			try {
+				creators = item.getCreators();
+			}
+			catch (_) {}
+			if (!creators.length) {
+				let source = [];
+				try {
+					source = other.getCreators();
+				}
+				catch (_) {}
+				if (source.length) {
+					plan.push({ key: other.key, field: "creators", count: source.length });
+				}
+			}
+		}
+		return plan;
+	},
+
+	/** Apply a planFieldFill() result; returns what was rejected by the schema. */
+	applyFieldFill(item, plan) {
+		let filled = [];
+		let rejected = [];
+		for (let step of plan) {
+			try {
+				if (step.field === "creators") {
+					let current = [];
+					try {
+						current = item.getCreators();
+					}
+					catch (_) {}
+					if (current.length) {
+						rejected.push({ key: step.key, field: "creators" });
+						continue;
+					}
+					let other = Zotero.Items.get(step.itemID);
+					item.setCreators(other.getCreators());
+				}
+				else {
+					item.setField(step.field, step.value);
+				}
+				filled.push({ key: step.key, field: step.field });
+			}
+			catch (_) {
+				rejected.push({ key: step.key, field: step.field });
+			}
+		}
+		return { filled, rejected };
+	},
+
+	isBlank(value) {
+		let text = String(value === null || value === undefined ? "" : value).trim();
+		return !text || text === "-";
+	},
+
+	async handleMergeRequest(request) {
+		let token = await this.readMergeToken();
+		let capabilities = null;
+		if (request.method === "GET") {
+			capabilities = this.mergeCapabilities();
+			capabilities.tokenConfigured = !!token;
+			if (!token) {
+				capabilities.tokenPath = this._tokenPath || null;
+				capabilities.tokenError = this._tokenError || null;
+			}
+			return this.json(200, capabilities);
+		}
+		if (!token) {
+			throw new Error(
+				"Merge is disabled: no " + this.mergeTokenFile + " in "
+				+ Zotero.DataDirectory.dir
+			);
+		}
+		this.checkMergeToken(request, token);
+		let payload = this.parsePayload(request);
+
+		if (payload.probe) {
+			capabilities = this.mergeCapabilities();
+			capabilities.tokenConfigured = true;
+			return this.json(200, capabilities);
+		}
+
+		let dryRun = payload.dryRun === undefined ? true : !!payload.dryRun;
+		let libraryID = await this.resolveLibraryID(payload.libraryID);
+		let groups = payload.groups;
+		if (!Array.isArray(groups) || !groups.length) {
+			throw new Error("groups: [{keep: KEY, merge: [KEY, ...]}] is required");
+		}
+		let library = Zotero.Libraries.get(libraryID);
+		if (!library || !library.editable) {
+			throw new Error("The library is not editable");
+		}
+
+		let mergeFn = this.getMergeFn();
+		if (!mergeFn) {
+			throw new Error(
+				"No merge implementation found (mergeItems.mjs / Zotero.Items.merge)"
+			);
+		}
+
+		let results = [];
+		let merged = 0;
+		let planned = 0;
+		let skipped = 0;
+		for (let group of groups) {
+			let entry = { dryRun };
+			try {
+				let target = this.resolveMergeItem(
+					group.keep || group.master || group.target, libraryID, "keep"
+				);
+				if (target.deleted) {
+					throw new Error("keep item is in the Trash: " + target.key);
+				}
+				if (!target.isRegularItem()) {
+					throw new Error("keep item is not a regular item: " + target.key);
+				}
+
+				let refs = group.merge || group.dups || group.sources || [];
+				if (!Array.isArray(refs) || !refs.length) {
+					throw new Error("merge: at least one key is required");
+				}
+
+				entry.keep = this.snapshotItem(target);
+				entry.merge = [];
+				let approved = [];
+				for (let ref of refs) {
+					let other = null;
+					try {
+						other = this.resolveMergeItem(ref, libraryID, "merge");
+					}
+					catch (error) {
+						entry.merge.push({ key: String(ref), why: error.message });
+						continue;
+					}
+					let record = { key: other.key, itemID: other.id };
+					if (other.id === target.id) {
+						record.why = "same item as keep";
+					}
+					else if (other.deleted) {
+						record.why = "already in the Trash";
+					}
+					else if (!other.isRegularItem()) {
+						record.why = "not a regular item";
+					}
+					else if (other.libraryID !== target.libraryID) {
+						record.why = "different library";
+					}
+					else {
+						let evidence = this.mergeEvidence(target, other);
+						if (!evidence) {
+							record.why = "no matching DOI or title";
+						}
+						else {
+							record.evidence = evidence;
+							record.itemType = this.itemTypeName(other);
+							record.typeMismatch = record.itemType
+								!== this.itemTypeName(target);
+							record.attachments = other.getAttachments().length;
+							record.notes = other.getNotes(true).length;
+							record.tags = other.getTags().length;
+							approved.push(other);
+						}
+					}
+					entry.merge.push(record);
+				}
+
+				if (!approved.length) {
+					entry.why = "nothing to merge";
+					skipped++;
+				}
+				else if (dryRun) {
+					let plan = await this.planFieldFill(target, approved);
+					entry.fieldsToFill = plan.map(step => ({
+						from: step.key,
+						field: step.field,
+						value: step.field === "creators"
+							? step.count + " creators"
+							: String(step.value).slice(0, 120)
+					}));
+					entry.attachmentsAfter = target.getAttachments().length
+						+ approved.reduce((n, item) => n + item.getAttachments().length, 0);
+					entry.collectionsAfter = new Set([
+						...target.getCollections(),
+						...approved.flatMap(item => item.getCollections())
+					]).size;
+					entry.wouldMerge = approved.map(item => item.key);
+					planned++;
+				}
+				else {
+					let plan = await this.planFieldFill(target, approved);
+					let { filled, rejected } = this.applyFieldFill(target, plan);
+					if (filled.length) {
+						await target.saveTx();
+					}
+					await mergeFn(target, approved);
+					entry.filled = filled;
+					entry.fieldsRejected = rejected;
+					entry.merged = approved.map(item => item.key);
+					entry.attachmentsAfter = target.getAttachments().length;
+					merged++;
+				}
+			}
+			catch (error) {
+				skipped++;
+				entry.error = error && error.message ? String(error.message) : String(error);
+			}
+			results.push(entry);
+		}
+
+		this.log(
+			"merge " + (dryRun ? "dry run" : "applied") + ": " + groups.length
+			+ " groups, " + merged + " merged, " + skipped + " skipped"
+		);
+		return this.json(200, {
+			ok: true,
+			dryRun,
+			implementation: this._mergeSource,
+			libraryID,
+			groups: results.length,
+			merged,
+			planned,
+			skipped,
+			results
+		});
 	},
 
 	base64ToBytes(value) {

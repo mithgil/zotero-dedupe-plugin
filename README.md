@@ -43,6 +43,8 @@ The extension README is at
 - Result window with library, collection path, item key, and PDF status
 - Progress spinner for duplicate check, save, and PDF attach
 - Saves into the same target collection that Zotero Connector would use
+- Programmatic merging of already-saved duplicates (`/dedupe/merge`), dry run by
+  default and token protected
 
 ## Why a plugin and an extension?
 
@@ -283,6 +285,72 @@ For compatibility, a JSON request is also accepted:
 it to a temporary file, imports it as a child attachment, and removes the
 temporary file.
 
+## `POST /dedupe/merge`
+
+Merges duplicate items using Zotero's own merge code
+(`chrome://zotero/content/mergeItems.mjs`, falling back to
+`Zotero.Items.merge`). This is the only endpoint that modifies existing items,
+so it has two permanent guards:
+
+1. **A token is required.** Send the header
+   `X-Zotero-Dedupe-Merge-Token` with the contents of
+   `<zotero data dir>/zotero-dedupe-merge-token`. The endpoint answers web
+   content, so without a secret any page that can reach `127.0.0.1:23119`
+   could ask for merges. If the file does not exist the endpoint refuses
+   everything, including dry runs:
+
+   ```bash
+   umask 077
+   python3 -c "import secrets;print(secrets.token_urlsafe(32))" \
+       > ~/Zotero/zotero-dedupe-merge-token
+   ```
+
+2. **`dryRun` defaults to `true`.** A real merge must say `"dryRun": false`.
+
+```bash
+curl -s http://127.0.0.1:23119/dedupe/merge \
+  -H 'Content-Type: application/json' \
+  -H "X-Zotero-Dedupe-Merge-Token: $(cat ~/Zotero/zotero-dedupe-merge-token)" \
+  -d '{"groups":[{"keep":"AAAA1111","merge":["BBBB2222"]}],"dryRun":true}'
+```
+
+`{"probe": true}` returns which merge implementation was found and whether a
+token is configured. `GET /dedupe/merge` reports the same without a token.
+
+What a merge does:
+
+- Zotero moves notes, attachments, tags, collections and relations onto the
+  kept item, deduplicates PDF attachments by content hash, and puts the merged
+  copies in the **Trash** (recoverable until the Trash is emptied).
+- Zotero's `mergeItems()` never copies field *values*, so the plugin first
+  copies over anything the kept item is missing. A field the kept item already
+  has is never overwritten, and creators are copied only when the kept item has
+  none. The response lists every field that was filled or would be filled:
+
+  ```json
+  {"dryRun": true, "results": [{
+     "keep": {"key": "AAAA1111", "title": "Van der Waals Epitaxy of MoS2"},
+     "merge": [{"key": "BBBB2222", "itemID": 2, "evidence": "doi",
+                "attachments": 2, "notes": 1, "tags": 1}],
+     "fieldsToFill": [{"from": "BBBB2222", "field": "DOI",
+                       "value": "10.1021/acs.nano.1234"}],
+     "attachmentsAfter": 3, "collectionsAfter": 2,
+     "wouldMerge": ["BBBB2222"]}]}
+  ```
+
+- Each item is checked before merging: same library, both regular items, not in
+  the Trash, and matching DOI or normalized title. Anything else is reported
+  with a `why` and skipped; a failed group never stops the batch.
+
+Better BibTeX is not involved here: the kept item keeps its stored
+`citationKey`, and the merged copies stop appearing in the next export. Re-run
+your export afterwards and verify the citation keys still compile
+(`/home/tim/Documents/AS/manuscripts/Interface/SI/scripts/bibkey.py check`).
+
+The driver that decides which copy is kept and sends the batches is
+`bibkey.py merge` in the Interface manuscript tree; `--plan` prints the plan
+without contacting this endpoint.
+
 ## Privacy
 
 - The plugin listens only on Zotero's existing `127.0.0.1:23119` server.
@@ -348,10 +416,13 @@ page.
 
 | Plugin | Extension |
 | --- | --- |
-| 1.1.6 | 1.3.3 |
+| 1.2.0 | 1.3.3 |
 
 The extension requires plugin **1.1.6** or newer for:
 
 - raw PDF stream upload (`/dedupe/save-pdf`)
 - collection picker (`/dedupe/collections`)
 - save target override (`options.collectionID`)
+
+Plugin 1.2.0 adds `/dedupe/merge`, which the browser extension does not use. It
+is driven from `bibkey.py merge`, so the pairing above is unchanged.
