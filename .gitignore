@@ -2,6 +2,9 @@
 zotero-dedupe.xpi
 *.zip
 
+# Icon preview renders (regenerate from icons/icon.svg)
+icons/preview*.png
+
 # Logs
 *.log
 
