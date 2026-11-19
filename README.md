@@ -345,11 +345,11 @@ What a merge does:
 Better BibTeX is not involved here: the kept item keeps its stored
 `citationKey`, and the merged copies stop appearing in the next export. Re-run
 your export afterwards and verify the citation keys still compile
-(`/home/tim/Documents/AS/manuscripts/Interface/SI/scripts/bibkey.py check`).
+([`bibkey check`](https://github.com/mithgil/bibkey)).
 
 The driver that decides which copy is kept and sends the batches is
-`bibkey.py merge` in the Interface manuscript tree; `--plan` prints the plan
-without contacting this endpoint.
+`bibkey merge`; `bibkey merge --plan` prints the plan without contacting this
+endpoint.
 
 ## Privacy
 
@@ -425,4 +425,5 @@ The extension requires plugin **1.1.6** or newer for:
 - save target override (`options.collectionID`)
 
 Plugin 1.2.0 adds `/dedupe/merge`, which the browser extension does not use. It
-is driven from `bibkey.py merge`, so the pairing above is unchanged.
+is driven from [`bibkey merge`](https://github.com/mithgil/bibkey), so the
+pairing above is unchanged.
